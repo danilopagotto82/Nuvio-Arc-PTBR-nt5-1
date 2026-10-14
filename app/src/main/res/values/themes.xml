@@ -1,0 +1,24 @@
+<resources>
+
+    <style name="Theme.MyApplication" parent="Theme.AppCompat.DayNight.NoActionBar" />
+
+    <style name="Theme.MyApplication.Launcher" parent="Theme.MyApplication">
+        <item name="android:windowBackground">@drawable/splash_screen_background</item>
+    </style>
+
+    <style name="Theme.MyApplication.Launcher.ArcticBlue" />
+    <style name="Theme.MyApplication.Launcher.Emerald" />
+    <style name="Theme.MyApplication.Launcher.RoseGold" />
+    <style name="Theme.MyApplication.Launcher.Copper" />
+    <style name="Theme.MyApplication.Launcher.Graphite" />
+    <style name="Theme.MyApplication.Launcher.Gold" />
+    <style name="Theme.MyApplication.Launcher.Jade" />
+    <style name="Theme.MyApplication.Launcher.Glass" />
+    <style name="Theme.MyApplication.Launcher.Crimson" />
+    <style name="Theme.MyApplication.Launcher.Ocean" />
+    <style name="Theme.MyApplication.Launcher.Violet" />
+    <style name="Theme.MyApplication.Launcher.EmeraldGreen" />
+    <style name="Theme.MyApplication.Launcher.Amber" />
+    <style name="Theme.MyApplication.Launcher.Rose" />
+    <style name="Theme.MyApplication.Launcher.White" />
+</resources>

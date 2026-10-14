@@ -1,0 +1,676 @@
+package com.nuvio.tv.ui.screens.settings
+
+import com.nuvio.tv.domain.model.AppFont
+import com.nuvio.tv.data.local.SubtitleEdgeStyle
+import androidx.lifecycle.ViewModel
+import androidx.media3.common.util.UnstableApi
+import com.nuvio.tv.core.plugin.PluginManager
+import com.nuvio.tv.data.local.DeviceLocalPlayerPreferences
+import com.nuvio.tv.data.local.LibassRenderType
+import com.nuvio.tv.data.local.InternalPlayerEngine
+import com.nuvio.tv.data.local.Dv7HandlingMode
+import com.nuvio.tv.data.local.SurroundFormatMode
+import com.nuvio.tv.data.local.SurroundChannelTarget
+import com.nuvio.tv.data.local.DeniedCodecHandling
+import com.nuvio.tv.data.local.PlayerSettings
+import com.nuvio.tv.data.local.PlayerSettingsDataStore
+import com.nuvio.tv.data.local.RemoteButtonMap
+import com.nuvio.tv.data.local.PlayerPreference
+import com.nuvio.tv.core.player.LastPlaybackDiagnostics
+import com.nuvio.tv.ui.screens.player.AudioRejectionReverifier
+import com.nuvio.tv.ui.screens.player.PlayerTunnelAvSyncPolicy
+import com.nuvio.tv.ui.screens.player.iec.PlatformIecAudioTrackFactory
+import com.nuvio.tv.data.local.FrameRateMatchingMode
+import com.nuvio.tv.data.local.NextEpisodeThresholdMode
+import com.nuvio.tv.data.local.StreamAutoPlayMode
+import com.nuvio.tv.data.local.StreamAutoPlaySource
+import com.nuvio.tv.data.local.AudioOutputChannels
+import com.nuvio.tv.data.local.AutoSkipSegmentType
+import com.nuvio.tv.data.local.MpvHardwareDecodeMode
+import com.nuvio.tv.data.local.SubtitleOrganizationMode
+import com.nuvio.tv.data.local.TrailerSettings
+import com.nuvio.tv.data.local.TrailerSettingsDataStore
+import com.nuvio.tv.core.torrent.TorrentCacheClearResult
+import com.nuvio.tv.core.torrent.TorrentCacheSize
+import com.nuvio.tv.core.torrent.TorrentCacheState
+import com.nuvio.tv.core.torrent.TorrentProfile
+import com.nuvio.tv.core.torrent.TorrentService
+import com.nuvio.tv.core.torrent.TorrentSettings
+import com.nuvio.tv.core.torrent.TorrentSettingsData
+import com.nuvio.tv.core.torrent.TorrentState
+import com.nuvio.tv.data.local.VodCacheSizeMode
+import com.nuvio.tv.domain.model.enabledAddons
+import com.nuvio.tv.domain.repository.AddonRepository
+import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
+import javax.inject.Inject
+
+@HiltViewModel
+class PlaybackSettingsViewModel @Inject constructor(
+    private val playerSettingsDataStore: PlayerSettingsDataStore,
+    private val deviceLocalPlayerPreferences: DeviceLocalPlayerPreferences,
+    private val trailerSettingsDataStore: TrailerSettingsDataStore,
+    private val addonRepository: AddonRepository,
+    private val pluginManager: PluginManager,
+    private val torrentSettings: TorrentSettings,
+    private val torrentService: TorrentService,
+    private val serverRepository: com.nuvio.tv.data.mediaserver.ServerRepository
+) : ViewModel() {
+
+    fun serverAuthHeaders(streamUrl: String?): Map<String, String> = serverRepository.authHeadersFor(streamUrl)
+
+    val playerSettings: Flow<PlayerSettings> = playerSettingsDataStore.playerSettings
+    val controlLayoutSnapshot = playerSettingsDataStore.controlLayoutSnapshot
+    suspend fun captureControlLayoutSnapshot() = controlLayoutSnapshot.first()
+    suspend fun saveControlLayout(snapshot: com.nuvio.tv.data.local.PlayerControlLayoutSnapshot,
+        layout: com.nuvio.tv.data.local.PlayerControlLayout?) = playerSettingsDataStore.saveControlLayout(snapshot, layout)
+    val transparentLetterbox: Flow<Boolean> = deviceLocalPlayerPreferences.transparentLetterbox
+    val trailerSettings: Flow<TrailerSettings> = trailerSettingsDataStore.settings
+    val torrentSettingsFlow: Flow<TorrentSettingsData> = torrentSettings.settings
+    val torrentCacheState: StateFlow<TorrentCacheState> = torrentService.cacheState
+    val torrentState: StateFlow<TorrentState> = torrentService.state
+
+    fun setP2pEnabled(enabled: Boolean) = torrentSettings.setP2pEnabled(enabled)
+    fun setHideTorrentStats(enabled: Boolean) = torrentSettings.setHideTorrentStats(enabled)
+    fun setTorrentProfile(profile: TorrentProfile) = torrentSettings.setTorrentProfile(profile)
+    fun setTorrentCacheSize(size: TorrentCacheSize) = torrentSettings.setCacheSize(size)
+    suspend fun clearTorrentCache(): TorrentCacheClearResult = torrentService.clearCache()
+
+    val lastPlaybackDiagnostics: Flow<LastPlaybackDiagnostics> = playerSettingsDataStore.lastPlaybackDiagnostics
+    val installedAddonNames: Flow<List<String>> = addonRepository.getInstalledAddons().map { addons ->
+        addons
+            .enabledAddons()
+            .filter { addon ->
+                addon.resources.any { resource ->
+                    resource.name.equals("stream", ignoreCase = true)
+                }
+            }
+            .map { it.displayName }
+            .distinct()
+            .sorted()
+    }
+    val enabledPluginNames: Flow<List<String>> = combine(
+        pluginManager.pluginsEnabled,
+        pluginManager.scrapers
+    ) { pluginsEnabled, scrapers ->
+        if (!pluginsEnabled) {
+            emptyList()
+        } else {
+            scrapers.filter { it.enabled }.map { it.name }.distinct().sorted()
+        }
+    }
+
+    suspend fun setPlayerPreference(preference: PlayerPreference) {
+        playerSettingsDataStore.setPlayerPreference(preference)
+    }
+
+    suspend fun setInternalPlayerEngine(engine: InternalPlayerEngine) {
+        playerSettingsDataStore.setInternalPlayerEngine(engine)
+    }
+
+    suspend fun setAutoSwitchInternalPlayerOnError(enabled: Boolean) {
+        playerSettingsDataStore.setAutoSwitchInternalPlayerOnError(enabled)
+    }
+
+    suspend fun setExternalPlayerForwardSubtitles(enabled: Boolean) {
+        playerSettingsDataStore.setExternalPlayerForwardSubtitles(enabled)
+    }
+
+    suspend fun setExternalPlayerSendSkipSegments(enabled: Boolean) {
+        playerSettingsDataStore.setExternalPlayerSendSkipSegments(enabled)
+    }
+
+    suspend fun setTrailerEnabled(enabled: Boolean) {
+        trailerSettingsDataStore.setEnabled(enabled)
+    }
+
+    suspend fun setTrailerDelaySeconds(seconds: Int) {
+        trailerSettingsDataStore.setDelaySeconds(seconds)
+    }
+
+    // Audio settings
+
+    suspend fun setDecoderPriority(priority: Int) {
+        playerSettingsDataStore.setDecoderPriority(priority)
+    }
+
+    suspend fun setDownmixEnabled(enabled: Boolean) {
+        playerSettingsDataStore.setDownmixEnabled(enabled)
+    }
+
+    suspend fun setAudioOutputChannels(channels: AudioOutputChannels) {
+        playerSettingsDataStore.setAudioOutputChannels(channels)
+    }
+
+    suspend fun setMaintainOriginalAudioOnDownmix(enabled: Boolean) {
+        playerSettingsDataStore.setMaintainOriginalAudioOnDownmix(enabled)
+    }
+
+    private val _iecProbeFeedback = MutableSharedFlow<IecProbeFeedback>(extraBufferCapacity = 4)
+    val iecProbeFeedback: SharedFlow<IecProbeFeedback> = _iecProbeFeedback
+
+    suspend fun setTunnelingEnabled(enabled: Boolean) {
+        playerSettingsDataStore.setTunnelingEnabled(enabled)
+        PlayerTunnelAvSyncPolicy.resetMemo()
+    }
+
+    suspend fun setForceOpticalPassthrough(enabled: Boolean) {
+        playerSettingsDataStore.setForceOpticalPassthrough(enabled)
+    }
+
+    suspend fun setUseSystemPassthrough(enabled: Boolean) {
+        playerSettingsDataStore.setUseSystemPassthrough(enabled)
+    }
+
+    fun resetIecPassthroughProbe() {
+        _iecProbeFeedback.tryEmit(IecProbeFeedback.STARTED)
+        PlatformIecAudioTrackFactory.resetIec61937Probe { usable ->
+            _iecProbeFeedback.tryEmit(
+                if (usable) IecProbeFeedback.AVAILABLE else IecProbeFeedback.UNAVAILABLE
+            )
+        }
+    }
+
+    suspend fun setSurroundFormatMode(mode: SurroundFormatMode) {
+        playerSettingsDataStore.setSurroundFormatMode(mode)
+    }
+
+    suspend fun setAllowAc3Passthrough(enabled: Boolean) {
+        playerSettingsDataStore.setAllowAc3Passthrough(enabled)
+    }
+
+    suspend fun setAllowEac3Passthrough(enabled: Boolean) {
+        playerSettingsDataStore.setAllowEac3Passthrough(enabled)
+    }
+
+    suspend fun setAllowTruehdPassthrough(enabled: Boolean) {
+        playerSettingsDataStore.setAllowTruehdPassthrough(enabled)
+    }
+
+    suspend fun setAllowDtsPassthrough(enabled: Boolean) {
+        playerSettingsDataStore.setAllowDtsPassthrough(enabled)
+    }
+
+    suspend fun setAllowDtshdPassthrough(enabled: Boolean) {
+        playerSettingsDataStore.setAllowDtshdPassthrough(enabled)
+    }
+
+    suspend fun setTranscodeDeniedToAc3(enabled: Boolean) {
+        playerSettingsDataStore.setDeniedCodecHandling(
+            if (enabled) DeniedCodecHandling.TRANSCODE_AC3 else DeniedCodecHandling.DECODE_PCM
+        )
+    }
+
+    suspend fun forgetLearnedAudioRejections() {
+        playerSettingsDataStore.clearLearnedAudioRejections()
+        AudioRejectionReverifier.ledger.invalidate()
+    }
+
+    suspend fun forgetTunnelStalls() {
+        PlayerTunnelAvSyncPolicy.resetMemo()
+        playerSettingsDataStore.clearTunnelDeadAudioClasses()
+    }
+
+    suspend fun setSurroundChannelTarget(target: SurroundChannelTarget) {
+        playerSettingsDataStore.setSurroundChannelTarget(target)
+    }
+
+    suspend fun setSurroundTvArcSoundbar(enabled: Boolean) {
+        playerSettingsDataStore.setSurroundTvArcSoundbar(enabled)
+    }
+
+    suspend fun setSkipSilence(enabled: Boolean) {
+        playerSettingsDataStore.setSkipSilence(enabled)
+    }
+
+    suspend fun setRememberAudioDelayPerDevice(enabled: Boolean) {
+        playerSettingsDataStore.setRememberAudioDelayPerDevice(enabled)
+    }
+
+    suspend fun setPreferredAudioLanguage(language: String) {
+        playerSettingsDataStore.setPreferredAudioLanguage(language)
+    }
+
+    suspend fun setSecondaryPreferredAudioLanguage(language: String?) {
+        playerSettingsDataStore.setSecondaryPreferredAudioLanguage(language)
+    }
+
+    suspend fun setLoadingOverlayEnabled(enabled: Boolean) {
+        playerSettingsDataStore.setLoadingOverlayEnabled(enabled)
+    }
+
+    suspend fun setShowPlayerLoadingSource(enabled: Boolean) {
+        playerSettingsDataStore.setShowPlayerLoadingSource(enabled)
+    }
+
+    suspend fun setShowPlayerLoadingStatus(enabled: Boolean) {
+        playerSettingsDataStore.setShowPlayerLoadingStatus(enabled)
+    }
+
+    suspend fun setDimHdrOverlays(enabled: Boolean) {
+        playerSettingsDataStore.setDimHdrOverlays(enabled)
+    }
+
+    suspend fun setPauseOverlayEnabled(enabled: Boolean) {
+        playerSettingsDataStore.setPauseOverlayEnabled(enabled)
+    }
+
+    suspend fun setOsdClockEnabled(enabled: Boolean) {
+        playerSettingsDataStore.setOsdClockEnabled(enabled)
+    }
+
+    suspend fun setTransparentLetterbox(enabled: Boolean) {
+        deviceLocalPlayerPreferences.setTransparentLetterbox(enabled)
+    }
+
+    val remoteButtons: Flow<RemoteButtonMap> = deviceLocalPlayerPreferences.remoteButtons
+
+    suspend fun setRemoteButtons(map: RemoteButtonMap) {
+        deviceLocalPlayerPreferences.setRemoteButtons(map)
+    }
+
+    suspend fun setSkipIntroEnabled(enabled: Boolean) {
+        playerSettingsDataStore.setSkipIntroEnabled(enabled)
+    }
+
+    suspend fun setParentalGuideEnabled(enabled: Boolean) {
+        playerSettingsDataStore.setParentalGuideEnabled(enabled)
+    }
+
+    suspend fun setAutoSkipSegmentTypeEnabled(segmentType: AutoSkipSegmentType, enabled: Boolean) {
+        playerSettingsDataStore.setAutoSkipSegmentTypeEnabled(segmentType, enabled)
+    }
+
+    suspend fun setFrameRateMatchingMode(mode: FrameRateMatchingMode) {
+        playerSettingsDataStore.setFrameRateMatchingMode(mode)
+    }
+
+    suspend fun setResolutionMatchingEnabled(enabled: Boolean) {
+        playerSettingsDataStore.setResolutionMatchingEnabled(enabled)
+    }
+
+    suspend fun disableAfrAndResolution() {
+        playerSettingsDataStore.setFrameRateMatchingMode(FrameRateMatchingMode.OFF)
+        playerSettingsDataStore.setResolutionMatchingEnabled(false)
+    }
+
+    suspend fun setMpvHardwareDecodeMode(mode: MpvHardwareDecodeMode) {
+        playerSettingsDataStore.setMpvHardwareDecodeMode(mode)
+    }
+
+    suspend fun setMpvHi10pGnextSoftwareFallbackEnabled(enabled: Boolean) {
+        playerSettingsDataStore.setMpvHi10pGnextSoftwareFallbackEnabled(enabled)
+    }
+
+
+    suspend fun setDv5ToDv81Enabled(enabled: Boolean) {
+        playerSettingsDataStore.setDv5ToDv81Enabled(enabled)
+    }
+
+    suspend fun setDv7HandlingMode(mode: Dv7HandlingMode) {
+        playerSettingsDataStore.setDv7HandlingMode(mode)
+        // The conversion-mode override only applies when handling is Convert to
+        // DV8.1. Any other mode clears the override back to None so a stale forced
+        // mode can't linger (disabled in UI but still stored).
+        if (mode != Dv7HandlingMode.DV81_LIBDOVI) {
+            playerSettingsDataStore.setDv7LibdoviModeOverride(-1)
+        }
+    }
+
+    suspend fun setDv7LibdoviModeOverride(mode: Int) {
+        playerSettingsDataStore.setDv7LibdoviModeOverride(mode)
+    }
+
+    suspend fun setStripHdr10PlusSei(enabled: Boolean) {
+        playerSettingsDataStore.setStripHdr10PlusSei(enabled)
+    }
+
+    suspend fun setInjectHdr10MetadataOnStrip(enabled: Boolean) {
+        playerSettingsDataStore.setInjectHdr10MetadataOnStrip(enabled)
+    }
+
+    suspend fun setUseLibass(enabled: Boolean) {
+        playerSettingsDataStore.setUseLibass(enabled)
+    }
+
+    suspend fun setLibassRenderType(renderType: LibassRenderType) {
+        playerSettingsDataStore.setLibassRenderType(renderType)
+    }
+
+    suspend fun setSubtitlePreferredLanguage(language: String) {
+        playerSettingsDataStore.setSubtitlePreferredLanguage(language)
+    }
+
+    suspend fun setSubtitleSecondaryLanguage(language: String?) {
+        playerSettingsDataStore.setSubtitleSecondaryLanguage(language)
+    }
+
+    suspend fun setSubtitleTertiaryLanguage(language: String?) {
+        playerSettingsDataStore.setSubtitleTertiaryLanguage(language)
+    }
+
+    suspend fun setUseForcedSubtitles(enabled: Boolean) {
+        playerSettingsDataStore.setUseForcedSubtitles(enabled)
+    }
+
+    suspend fun setAddonSubtitlesEnabled(enabled: Boolean) {
+        playerSettingsDataStore.setAddonSubtitlesEnabled(enabled)
+    }
+
+    suspend fun setSubtitleShowOnlyPreferredLanguages(enabled: Boolean) {
+        playerSettingsDataStore.setSubtitleShowOnlyPreferredLanguages(enabled)
+    }
+
+    suspend fun setSubtitleStripSdh(enabled: Boolean) {
+        playerSettingsDataStore.setSubtitleStripSdh(enabled)
+    }
+
+    suspend fun setSubtitleSize(size: Int) {
+        playerSettingsDataStore.setSubtitleSize(size)
+    }
+
+    suspend fun setSubtitleVerticalOffset(offset: Int) {
+        playerSettingsDataStore.setSubtitleVerticalOffset(offset)
+    }
+
+    suspend fun setSubtitleBold(bold: Boolean) {
+        playerSettingsDataStore.setSubtitleBold(bold)
+    }
+
+    suspend fun setSubtitleTextColor(color: Int) {
+        playerSettingsDataStore.setSubtitleTextColor(color)
+    }
+
+    suspend fun setSubtitleBackgroundColor(color: Int) {
+        playerSettingsDataStore.setSubtitleBackgroundColor(color)
+    }
+
+    suspend fun setSubtitleFont(font: AppFont?) { playerSettingsDataStore.setSubtitleFont(font) }
+    suspend fun setSubtitleEdgeStyle(style: SubtitleEdgeStyle) { playerSettingsDataStore.setSubtitleEdgeStyle(style) }
+
+    suspend fun setSubtitleOutlineEnabled(enabled: Boolean) {
+        playerSettingsDataStore.setSubtitleOutlineEnabled(enabled)
+    }
+
+    suspend fun setSubtitleOutlineColor(color: Int) {
+        playerSettingsDataStore.setSubtitleOutlineColor(color)
+    }
+
+    suspend fun setSubtitleOutlineWidth(width: Int) {
+        playerSettingsDataStore.setSubtitleOutlineWidth(width)
+    }
+
+    suspend fun setSubtitleOrganizationMode(mode: SubtitleOrganizationMode) {
+        playerSettingsDataStore.setSubtitleOrganizationMode(mode)
+    }
+
+    // Buffer settings functions
+
+    suspend fun setBufferMinBufferMs(ms: Int) {
+        playerSettingsDataStore.setBufferMinBufferMs(ms)
+    }
+
+    suspend fun setBufferMaxBufferMs(ms: Int) {
+        playerSettingsDataStore.setBufferMaxBufferMs(ms)
+    }
+
+    suspend fun setBufferForPlaybackMs(ms: Int) {
+        playerSettingsDataStore.setBufferForPlaybackMs(ms)
+    }
+
+    suspend fun setBufferForPlaybackAfterRebufferMs(ms: Int) {
+        playerSettingsDataStore.setBufferForPlaybackAfterRebufferMs(ms)
+    }
+
+    @androidx.annotation.OptIn(UnstableApi::class)
+    suspend fun setBufferTargetSizeMb(mb: Int) {
+        val current = playerSettings.first()
+        if (!current.useParallelConnections || current.nuvioPerformanceModeEnabled || current.allowLargeTargetBuffer) {
+            playerSettingsDataStore.setBufferTargetSizeMb(mb)
+            return
+        }
+        val currentChunkMb = Math.ceil(current.parallelChunkSizeKb / 1024.0).toInt()
+        val (adjBuffer, adjChunkMb) = MemoryBudget.enforce(
+            mb,
+            currentChunkMb,
+            current.parallelConnectionCount
+        )
+        if (adjBuffer == mb && adjChunkMb == currentChunkMb) {
+            playerSettingsDataStore.setBufferTargetSizeMb(mb)
+        } else {
+            playerSettingsDataStore.updateMemorySettings(
+                targetBufferSizeMb = adjBuffer,
+                parallelChunkSizeKb = adjChunkMb * 1024
+            )
+        }
+    }
+
+    suspend fun setBufferBackBufferDurationMs(ms: Int) {
+        playerSettingsDataStore.setBufferBackBufferDurationMs(ms)
+    }
+
+    suspend fun setBufferRetainBackBufferFromKeyframe(retain: Boolean) {
+        playerSettingsDataStore.setBufferRetainBackBufferFromKeyframe(retain)
+    }
+
+    @androidx.annotation.OptIn(UnstableApi::class)
+    suspend fun resetBufferSettingsToDefaults() {
+        playerSettingsDataStore.resetBufferSettingsToDefaults()
+        val current = playerSettings.first()
+        if (!current.useParallelConnections || current.nuvioPerformanceModeEnabled || current.allowLargeTargetBuffer) return
+
+        val currentChunkMb = Math.ceil(current.parallelChunkSizeKb / 1024.0).toInt()
+        val (adjBuffer, adjChunkMb) = MemoryBudget.enforce(
+            MemoryBudget.defaultBufferSizeMb,
+            currentChunkMb,
+            current.parallelConnectionCount
+        )
+        if (adjChunkMb != currentChunkMb ||
+            adjBuffer != MemoryBudget.defaultBufferSizeMb
+        ) {
+            playerSettingsDataStore.updateMemorySettings(
+                targetBufferSizeMb = adjBuffer,
+                parallelChunkSizeKb = adjChunkMb * 1024
+            )
+        }
+    }
+
+    suspend fun resetNetworkSettingsToDefaults() {
+        playerSettingsDataStore.resetNetworkSettingsToDefaults()
+    }
+
+    suspend fun setVodCacheEnabled(enabled: Boolean) {
+        playerSettingsDataStore.setVodCacheEnabled(enabled)
+    }
+    suspend fun setBufferEngineEnabled(enabled: Boolean) {
+        playerSettingsDataStore.setBufferEngineEnabled(enabled)
+    }
+
+    suspend fun setParallelNetworkEnabled(enabled: Boolean) {
+        playerSettingsDataStore.setParallelNetworkEnabled(enabled)
+    }
+
+    suspend fun setAllowLargeTargetBuffer(enabled: Boolean) {
+        playerSettingsDataStore.setAllowLargeTargetBuffer(enabled)
+    }
+    suspend fun setBufferBudgetManaged(enabled: Boolean) {
+        playerSettingsDataStore.setBufferBudgetManaged(enabled)
+    }
+    suspend fun setUseParallelConnections(enabled: Boolean) {
+        if (!enabled) {
+            playerSettingsDataStore.setUseParallelConnections(false)
+            return
+        }
+        val current = playerSettings.first()
+        if (current.nuvioPerformanceModeEnabled || current.allowLargeTargetBuffer) {
+            playerSettingsDataStore.setUseParallelConnections(true)
+            return
+        }
+        val bufferMb = MemoryBudget.effectiveBufferMb(current.bufferSettings.targetBufferSizeMb)
+        val currentChunkMb = Math.ceil(current.parallelChunkSizeKb / 1024.0).toInt()
+        val (adjBuffer, adjChunkMb) = MemoryBudget.enforce(
+            bufferMb,
+            currentChunkMb,
+            current.parallelConnectionCount
+        )
+        if (adjBuffer == bufferMb && adjChunkMb == currentChunkMb) {
+            playerSettingsDataStore.setUseParallelConnections(true)
+        } else {
+            playerSettingsDataStore.updateMemorySettings(
+                useParallelConnections = true,
+                targetBufferSizeMb = if (adjBuffer != bufferMb) adjBuffer else null,
+                parallelChunkSizeKb = adjChunkMb * 1024
+            )
+        }
+    }
+
+    @androidx.annotation.OptIn(UnstableApi::class)
+    suspend fun setParallelConnectionCount(count: Int) {
+        val current = playerSettings.first()
+        if (current.nuvioPerformanceModeEnabled || current.allowLargeTargetBuffer) {
+            playerSettingsDataStore.setParallelConnectionCount(count)
+            return
+        }
+        if (count <= current.parallelConnectionCount) {
+            playerSettingsDataStore.setParallelConnectionCount(count)
+        } else {
+            val bufferMb = MemoryBudget.effectiveBufferMb(current.bufferSettings.targetBufferSizeMb)
+            val maxChunk = MemoryBudget.maxChunkMb(bufferMb, count)
+            val currentChunkMb = Math.ceil(current.parallelChunkSizeKb / 1024.0).toInt()
+            val newChunkMb = currentChunkMb.coerceAtMost(maxChunk)
+            if (newChunkMb == currentChunkMb) {
+                playerSettingsDataStore.setParallelConnectionCount(count)
+            } else {
+                playerSettingsDataStore.updateMemorySettings(
+                    parallelConnectionCount = count,
+                    parallelChunkSizeKb = newChunkMb * 1024
+                )
+            }
+        }
+    }
+
+    @androidx.annotation.OptIn(UnstableApi::class)
+    suspend fun setParallelChunkSizeKb(kb: Int) {
+        val current = playerSettings.first()
+        if (current.nuvioPerformanceModeEnabled || current.allowLargeTargetBuffer) {
+            playerSettingsDataStore.setParallelChunkSizeKb(kb)
+            return
+        }
+        val bufferMb = MemoryBudget.effectiveBufferMb(current.bufferSettings.targetBufferSizeMb)
+        val maxChunk = MemoryBudget.maxChunkMb(bufferMb, current.parallelConnectionCount)
+        val clampedChunkKb = kb.coerceAtMost(maxChunk * 1024)
+        playerSettingsDataStore.setParallelChunkSizeKb(clampedChunkKb)
+    }
+
+    suspend fun setStreamAutoPlayMode(mode: StreamAutoPlayMode) {
+        playerSettingsDataStore.setStreamAutoPlayMode(mode)
+    }
+
+    suspend fun setStreamAutoPlaySource(source: StreamAutoPlaySource) {
+        playerSettingsDataStore.setStreamAutoPlaySource(source)
+    }
+
+    suspend fun setStreamAutoPlaySelectedAddons(addons: Set<String>) {
+        playerSettingsDataStore.setStreamAutoPlaySelectedAddons(addons)
+    }
+
+    suspend fun setStreamAutoPlaySelectedPlugins(plugins: Set<String>) {
+        playerSettingsDataStore.setStreamAutoPlaySelectedPlugins(plugins)
+    }
+
+    suspend fun setStreamAutoPlayRegex(regex: String) {
+        playerSettingsDataStore.setStreamAutoPlayRegex(regex)
+    }
+
+    suspend fun setPostPlayRecommendationsEnabled(enabled: Boolean) {
+        playerSettingsDataStore.setPostPlayRecommendationsEnabled(enabled)
+    }
+
+    suspend fun setPostPlayMovieThresholdPercent(percent: Int) {
+        playerSettingsDataStore.setPostPlayMovieThresholdPercent(percent)
+    }
+
+    suspend fun setStreamAutoPlayNextEpisodeEnabled(enabled: Boolean) {
+        playerSettingsDataStore.setStreamAutoPlayNextEpisodeEnabled(enabled)
+    }
+
+    suspend fun setStreamAutoPlayNextEpisodeFallbackEnabled(enabled: Boolean) {
+        playerSettingsDataStore.setStreamAutoPlayNextEpisodeFallbackEnabled(enabled)
+    }
+
+    suspend fun setStreamAutoPlayPreferBingeGroupForNextEpisode(enabled: Boolean) {
+        playerSettingsDataStore.setStreamAutoPlayPreferBingeGroupForNextEpisode(enabled)
+    }
+
+    suspend fun setStreamListSort(sort: com.nuvio.tv.data.local.StreamListSort) {
+        playerSettingsDataStore.setStreamListSort(sort)
+    }
+
+    suspend fun setStreamAutoPlayReuseBingeGroup(enabled: Boolean) {
+        playerSettingsDataStore.setStreamAutoPlayReuseBingeGroup(enabled)
+    }
+
+    suspend fun setStreamAutoPlayTimeoutSeconds(seconds: Int) {
+        playerSettingsDataStore.setStreamAutoPlayTimeoutSeconds(seconds)
+    }
+
+    suspend fun setSpeculativeStreamSearchEnabled(enabled: Boolean) {
+        playerSettingsDataStore.setSpeculativeStreamSearchEnabled(enabled)
+    }
+
+    suspend fun setStreamAutoPlayEagerReadyEnabled(enabled: Boolean) {
+        playerSettingsDataStore.setStreamAutoPlayEagerReadyEnabled(enabled)
+    }
+
+    suspend fun setPreloadNextEpisodeSources(enabled: Boolean) {
+        playerSettingsDataStore.setPreloadNextEpisodeSources(enabled)
+    }
+
+    suspend fun setStillWatchingEnabled(enabled: Boolean) {
+        playerSettingsDataStore.setStillWatchingEnabled(enabled)
+    }
+
+    suspend fun setStillWatchingEpisodeThreshold(threshold: Int) {
+        playerSettingsDataStore.setStillWatchingEpisodeThreshold(threshold)
+    }
+
+    suspend fun setNextEpisodeThresholdMode(mode: NextEpisodeThresholdMode) {
+        playerSettingsDataStore.setNextEpisodeThresholdMode(mode)
+    }
+
+    suspend fun setNextEpisodeThresholdPercent(percent: Float) {
+        playerSettingsDataStore.setNextEpisodeThresholdPercent(percent)
+    }
+
+    suspend fun setNextEpisodeThresholdMinutesBeforeEnd(minutes: Float) {
+        playerSettingsDataStore.setNextEpisodeThresholdMinutesBeforeEnd(minutes)
+    }
+
+    suspend fun setStreamReuseLastLinkEnabled(enabled: Boolean) {
+        playerSettingsDataStore.setStreamReuseLastLinkEnabled(enabled)
+    }
+
+    suspend fun setStreamReuseLastLinkCacheHours(hours: Int) {
+        playerSettingsDataStore.setStreamReuseLastLinkCacheHours(hours)
+    }
+
+    suspend fun setVodCacheSizeMode(mode: VodCacheSizeMode) {
+        playerSettingsDataStore.setVodCacheSizeMode(mode)
+    }
+
+    suspend fun setVodCacheSizeMb(mb: Int) {
+        playerSettingsDataStore.setVodCacheSizeMb(mb)
+    }
+
+    suspend fun setNuvioPerformanceModeEnabled(enabled: Boolean) {
+        playerSettingsDataStore.setNuvioPerformanceModeEnabled(enabled)
+    }
+}
+
+enum class IecProbeFeedback { STARTED, AVAILABLE, UNAVAILABLE }

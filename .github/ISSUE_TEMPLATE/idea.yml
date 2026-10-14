@@ -1,0 +1,18 @@
+name: Idea
+description: Something you'd like to see in Nuvio Arc
+labels: [idea]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Nuvio Arc is a one-person hobby project. I read every issue but can't promise a reply or that an idea gets built.
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like?
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why would it help you?

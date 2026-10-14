@@ -1,0 +1,216 @@
+package com.nuvio.tv.ui.components
+
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.scaleIn
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.width
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.sp
+import androidx.tv.material3.Text
+import com.nuvio.tv.domain.model.MemberTier
+import com.nuvio.tv.ui.membership.Membership
+import kotlin.math.abs
+import kotlin.math.cos
+import kotlin.math.sin
+
+// Sized against the lockup's lettering (x-height 32 % of the lockup, baseline at 71 %) and set on its baseline.
+private const val MemberWordmarkHeightRatio = 0.306f
+private const val MemberWordmarkVerticalOffsetRatio = 0.096f
+private const val MemberWordmarkSpacingRatio = 0.11f
+internal const val MemberBadgeGradientAngleDegrees = 100f
+internal const val MemberBadgeGradientWidthMultiplier = 2.4f
+internal const val MemberBadgeSweepHalfDurationMs = 2_750
+/** Sweeps there and back when the badge appears, then rests, so a still page stops redrawing. */
+internal const val MemberBadgeSweepCycles = 1
+
+internal data class MemberBadgeStyle(
+    val label: String,
+    val colorStops: List<Pair<Float, Color>>
+)
+
+internal fun MemberTier.badgeStyle(): MemberBadgeStyle = when (this) {
+    MemberTier.SUPPORTER -> MemberBadgeStyle(
+        label = "Supporter",
+        colorStops = listOf(
+            0f to Color(0xFFD4843D),
+            0.5f to Color(0xFFFFDE90),
+            1f to Color(0xFFD4843D)
+        )
+    )
+    MemberTier.SUPPORTER_PLUS -> MemberBadgeStyle(
+        label = "Supporter+",
+        colorStops = listOf(
+            0f to Color(0xFF91A8FF),
+            0.52f to Color(0xFFF08BD8),
+            0.78f to Color(0xFFFF9B8E),
+            1f to Color(0xFF91A8FF)
+        )
+    )
+}
+
+@Composable
+fun MemberBrandWordmark(
+    height: Dp,
+    modifier: Modifier = Modifier,
+    contentDescription: String? = null,
+    drawableOverride: Int? = null
+) {
+    val access = Membership.access
+
+    Row(
+        modifier = modifier.height(height),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Crossfade(
+            targetState = drawableOverride,
+            animationSpec = tween(durationMillis = 180),
+            label = "brandWordmarkCrossfade"
+        ) { currentDrawable ->
+            BrandWordmark(
+                modifier = Modifier.height(height),
+                contentDescription = contentDescription,
+                contentScale = ContentScale.Fit,
+                drawableOverride = currentDrawable
+            )
+        }
+
+        access.tier?.let { tier ->
+            LocalMemberSuffix(
+                tier = tier,
+                height = height
+            )
+        }
+    }
+}
+
+@Composable
+private fun LocalMemberSuffix(
+    tier: MemberTier,
+    height: Dp
+) {
+    val badgeStyle = remember(tier) { tier.badgeStyle() }
+    var visible by remember(tier) { mutableStateOf(false) }
+    var badgeSize by remember(tier) { mutableStateOf(IntSize.Zero) }
+    val gradientBrush = rememberMemberBadgeGradientBrush(
+        style = badgeStyle,
+        size = badgeSize
+    )
+
+    LaunchedEffect(tier) {
+        visible = true
+    }
+
+    MemberSuffixVisibility(
+        visible = visible,
+        spacing = height * MemberWordmarkSpacingRatio
+    ) {
+        Text(
+            text = badgeStyle.label,
+            style = TextStyle(
+                brush = gradientBrush,
+                fontSize = (height.value * MemberWordmarkHeightRatio).sp,
+                fontWeight = FontWeight.SemiBold
+            ),
+            modifier = Modifier
+                .offset(y = height * MemberWordmarkVerticalOffsetRatio)
+                .onSizeChanged { badgeSize = it }
+        )
+    }
+}
+
+@Composable
+internal fun rememberMemberBadgeGradientBrush(
+    style: MemberBadgeStyle,
+    size: IntSize
+): Brush {
+    val sweep = remember { Animatable(0f) }
+    LaunchedEffect(sweep) {
+        val half = tween<Float>(MemberBadgeSweepHalfDurationMs, easing = CubicBezierEasing(0.42f, 0f, 0.58f, 1f))
+        repeat(MemberBadgeSweepCycles) {
+            sweep.animateTo(1f, half)
+            sweep.animateTo(0f, half)
+        }
+    }
+    val gradientProgress = sweep.value
+    return remember(style, size, gradientProgress) {
+        memberBadgeGradientBrush(
+            style = style,
+            size = size,
+            progress = gradientProgress
+        )
+    }
+}
+
+private fun memberBadgeGradientBrush(
+    style: MemberBadgeStyle,
+    size: IntSize,
+    progress: Float
+): Brush {
+    val textWidth = size.width.toFloat().coerceAtLeast(1f)
+    val textHeight = size.height.toFloat().coerceAtLeast(1f)
+    val gradientWidth = textWidth * MemberBadgeGradientWidthMultiplier
+    val gradientLeft = -(gradientWidth - textWidth) * progress.coerceIn(0f, 1f)
+    val angleRadians = Math.toRadians(MemberBadgeGradientAngleDegrees.toDouble())
+    val directionX = sin(angleRadians).toFloat()
+    val directionY = -cos(angleRadians).toFloat()
+    val gradientLineLength =
+        abs(gradientWidth * directionX) + abs(textHeight * directionY)
+    val center = Offset(
+        x = gradientLeft + gradientWidth / 2f,
+        y = textHeight / 2f
+    )
+    val halfVector = Offset(
+        x = directionX * gradientLineLength / 2f,
+        y = directionY * gradientLineLength / 2f
+    )
+
+    return Brush.linearGradient(
+        colorStops = style.colorStops.toTypedArray(),
+        start = center - halfVector,
+        end = center + halfVector
+    )
+}
+
+@Composable
+private fun MemberSuffixVisibility(
+    visible: Boolean,
+    spacing: Dp,
+    content: @Composable () -> Unit
+) {
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn(tween(360)) +
+            expandHorizontally(tween(420), expandFrom = Alignment.Start) +
+            scaleIn(tween(420), initialScale = 0.94f)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Spacer(modifier = Modifier.width(spacing))
+            content()
+        }
+    }
+}

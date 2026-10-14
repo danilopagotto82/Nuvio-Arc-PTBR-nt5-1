@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Problem with the official Nuvio app?
+    url: https://github.com/NuvioMedia/NuvioTV
+    about: Please use the official Nuvio channels for the official app.
+  - name: Chat with other users
+    url: https://www.reddit.com/r/NuvioForks/
+    about: r/NuvioForks

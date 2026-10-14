@@ -1,0 +1,344 @@
+package com.nuvio.tv.ui.screens.profile
+
+import com.nuvio.tv.core.util.StartupLatencyTrace
+
+import android.util.Log
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.nuvio.tv.core.party.PartyAvatars
+import com.nuvio.tv.core.profile.LocalProfileAvatars
+import com.nuvio.tv.core.profile.ProfileManager
+import com.nuvio.tv.core.sync.ProfileSettingsSyncService
+import com.nuvio.tv.core.sync.ProfileSyncService
+import com.nuvio.tv.core.sync.SetProfilePinResult
+import com.nuvio.tv.data.local.ProfileLockStateDataStore
+import com.nuvio.tv.data.remote.supabase.AvatarCatalogItem
+import com.nuvio.tv.data.remote.supabase.AvatarRepository
+import com.nuvio.tv.data.remote.supabase.ProfileBackgroundCatalogItem
+import com.nuvio.tv.data.remote.supabase.ProfileBackgroundRepository
+import com.nuvio.tv.data.remote.supabase.SupabaseProfilePinVerifyResult
+import com.nuvio.tv.data.repository.MemberAccessRepository
+import com.nuvio.tv.domain.model.CosmeticEntitlement
+import com.nuvio.tv.domain.model.UserProfile
+import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
+import javax.inject.Inject
+
+sealed interface CreateProfileResult {
+    data class Created(
+        val profile: UserProfile,
+        val settingsCopyResult: Result<Unit>?
+    ) : CreateProfileResult
+
+    data object Failed : CreateProfileResult
+}
+
+@HiltViewModel
+class ProfileSelectionViewModel @Inject constructor(
+    private val profileManager: ProfileManager,
+    private val profileSyncService: ProfileSyncService,
+    private val profileSettingsSyncService: ProfileSettingsSyncService,
+    private val avatarRepository: AvatarRepository,
+    private val profileBackgroundRepository: ProfileBackgroundRepository,
+    memberAccessRepository: MemberAccessRepository,
+    private val profileLockStateDataStore: ProfileLockStateDataStore,
+    private val localAvatars: LocalProfileAvatars
+) : ViewModel() {
+    val activeProfileId: StateFlow<Int> = profileManager.activeProfileId
+    val profiles: StateFlow<List<UserProfile>> = combine(profileManager.profiles, localAvatars.avatars) { list, _ ->
+        list.map(localAvatars::shown)
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, profileManager.profiles.value.map(localAvatars::shown))
+
+    /** Avatars from the built-in set chosen on this box, by profile id. */
+    val localAvatarIds: StateFlow<Map<Int, String>> = localAvatars.avatars
+
+    val canAddProfile: Boolean
+        get() = profileManager.canCreateProfile
+
+    private val _avatarCatalog = MutableStateFlow(localAvatars.catalog)
+    val avatarCatalog: StateFlow<List<AvatarCatalogItem>> = _avatarCatalog.asStateFlow()
+
+    val hasProfileAvatarAccess: StateFlow<Boolean> = memberAccessRepository.access
+        .map { access -> access.entitlements.includes(CosmeticEntitlement.PROFILE_AVATARS) }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    val hasProfileBackgroundAccess: StateFlow<Boolean> = memberAccessRepository.access
+        .map { access -> access.entitlements.includes(CosmeticEntitlement.PROFILE_BACKGROUNDS) }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    val profileBackgroundCatalog: StateFlow<List<ProfileBackgroundCatalogItem>> = combine(
+        profileBackgroundRepository.catalog,
+        hasProfileBackgroundAccess
+    ) { catalog, hasAccess -> if (hasAccess) catalog else emptyList() }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    private val _isCreating = MutableStateFlow(false)
+    val isCreating: StateFlow<Boolean> = _isCreating.asStateFlow()
+
+    private val _isSaving = MutableStateFlow(false)
+    val isSaving: StateFlow<Boolean> = _isSaving.asStateFlow()
+
+    private val _isCopyingSettings = MutableStateFlow(false)
+    val isCopyingSettings: StateFlow<Boolean> = _isCopyingSettings.asStateFlow()
+
+    val profilePinEnabled: StateFlow<Map<Int, Boolean>> = profileLockStateDataStore.pinEnabled
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
+
+    // The poster preview must distinguish an unloaded lock cache from an unlocked profile.
+    val posterPreviewPinStates: StateFlow<Map<Int, Boolean>?> = profileLockStateDataStore.pinEnabled
+        .map<Map<Int, Boolean>, Map<Int, Boolean>?> { it }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    private val _isPinOperationInProgress = MutableStateFlow(false)
+    val isPinOperationInProgress: StateFlow<Boolean> = _isPinOperationInProgress.asStateFlow()
+
+    init {
+        refreshProfilePinStates()
+        viewModelScope.launch {
+            hasProfileAvatarAccess.collectLatest { hasAccess ->
+                loadAvatarCatalog(hasAccess)
+            }
+        }
+        viewModelScope.launch {
+            hasProfileBackgroundAccess.collectLatest { hasAccess ->
+                if (hasAccess) {
+                    profileBackgroundRepository.ensureLoaded()
+                } else {
+                    profileBackgroundRepository.invalidateCache()
+                }
+            }
+        }
+    }
+
+    fun loadAvatarCatalog() {
+        viewModelScope.launch {
+            loadAvatarCatalog(hasProfileAvatarAccess.value)
+        }
+    }
+
+    private suspend fun loadAvatarCatalog(hasMemberAccess: Boolean) {
+        try {
+            _avatarCatalog.value = avatarRepository.getAvatarCatalog(hasMemberAccess) + localAvatars.catalog
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            Log.e("ProfileSelectionVM", "Failed to load avatar catalog", error)
+        }
+    }
+
+    fun getAvatarImageUrl(avatarId: String?): String? {
+        if (avatarId == null) return null
+        if (LocalProfileAvatars.isLocal(avatarId)) return PartyAvatars.imageUri(avatarId)
+        return avatarRepository.getAvatarImageUrl(avatarId, _avatarCatalog.value)
+    }
+
+    fun loadProfileBackground(id: String) {
+        if (hasProfileBackgroundAccess.value) profileBackgroundRepository.loadSelectedAndPreload(id)
+    }
+
+    fun preloadProfileBackgrounds() {
+        if (hasProfileBackgroundAccess.value) profileBackgroundRepository.preloadImages()
+    }
+
+    var isSelectingProfile = false
+        private set
+
+    fun selectProfile(id: Int, onComplete: () -> Unit, onFailure: () -> Unit = {}) {
+        if (isSelectingProfile) return
+        StartupLatencyTrace.begin("profile_tap")
+        isSelectingProfile = true
+        viewModelScope.launch {
+            try {
+                profileManager.setActiveProfile(id)
+                StartupLatencyTrace.mark("profile_active_set")
+                onComplete()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                Log.e("ProfileSelectionVM", "Failed to select profile", error)
+                onFailure()
+            } finally {
+                isSelectingProfile = false
+            }
+        }
+    }
+
+
+    fun createProfile(
+        name: String,
+        avatarColorHex: String,
+        avatarId: String? = null,
+        copyFromProfileId: Int? = null,
+        copyProviderCredentials: Boolean = false,
+        onComplete: (CreateProfileResult) -> Unit = {}
+    ) {
+        if (_isCreating.value) return
+        viewModelScope.launch {
+            _isCreating.value = true
+            val result = try {
+                val local = avatarId?.takeIf(LocalProfileAvatars::isLocal)
+                val profile = profileManager.createProfile(
+                    name = name,
+                    avatarColorHex = avatarColorHex,
+                    avatarId = if (local != null) null else avatarId
+                )
+                if (profile != null) {
+                    localAvatars.set(profile.id, local)
+                    profileSyncService.pushToRemote()
+                    val copyResult = copyFromProfileId?.let { sourceProfileId ->
+                        profileSettingsSyncService.copyProfileSetup(
+                            sourceProfileId = sourceProfileId,
+                            targetProfileId = profile.id,
+                            copyProviderCredentials = copyProviderCredentials
+                        )
+                    }
+                    refreshProfilePinStates()
+                    CreateProfileResult.Created(profile, copyResult)
+                } else {
+                    CreateProfileResult.Failed
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                Log.e("ProfileSelectionVM", "Failed to create profile", error)
+                CreateProfileResult.Failed
+            } finally {
+                _isCreating.value = false
+            }
+            onComplete(result)
+        }
+    }
+
+    fun copyProfileSettings(
+        sourceProfileId: Int,
+        targetProfileId: Int,
+        copyProviderCredentials: Boolean,
+        onComplete: (Result<Unit>) -> Unit
+    ) {
+        if (_isCopyingSettings.value) return
+        viewModelScope.launch {
+            _isCopyingSettings.value = true
+            val result = try {
+                profileSettingsSyncService.copyProfileSetup(
+                    sourceProfileId = sourceProfileId,
+                    targetProfileId = targetProfileId,
+                    copyProviderCredentials = copyProviderCredentials
+                )
+            } finally {
+                _isCopyingSettings.value = false
+            }
+            onComplete(result)
+        }
+    }
+
+    fun updateProfile(profile: UserProfile) {
+        if (_isSaving.value) return
+        viewModelScope.launch {
+            _isSaving.value = true
+            val stored = profileManager.profiles.value.firstOrNull { it.id == profile.id }
+            val local = profile.avatarId?.takeIf(LocalProfileAvatars::isLocal)
+            val hadLocal = localAvatars.get(profile.id) != null
+            val saved = when {
+                local != null -> profile.copy(avatarId = stored?.avatarId, avatarUrl = stored?.avatarUrl)
+                hadLocal && profile.avatarId == null && profile.avatarUrl == null ->
+                    profile.copy(avatarId = stored?.avatarId, avatarUrl = stored?.avatarUrl)
+                LocalProfileAvatars.isLocalImage(profile.avatarUrl) -> profile.copy(avatarUrl = stored?.avatarUrl)
+                else -> profile
+            }
+            localAvatars.set(profile.id, local)
+            profileManager.updateProfile(saved)
+            profileSyncService.pushToRemote()
+            refreshProfilePinStates()
+            _isSaving.value = false
+        }
+    }
+
+    fun deleteProfile(id: Int) {
+        viewModelScope.launch {
+            profileManager.deleteProfile(id)
+            profileSyncService.deleteProfileData(id)
+            profileSyncService.pushToRemote()
+            refreshProfilePinStates()
+        }
+    }
+
+    fun refreshProfilePinStates() {
+        viewModelScope.launch {
+            var attempt = 0
+            while (attempt < 4) {
+                val result = profileSyncService.pullProfileLockStates()
+                if (result.isSuccess) {
+                    profileLockStateDataStore.replaceAll(result.getOrNull().orEmpty())
+                    return@launch
+                }
+                Log.e(
+                    "ProfileSelectionVM",
+                    "Failed to refresh profile PIN states (attempt=$attempt)",
+                    result.exceptionOrNull()
+                )
+                attempt++
+                delay(2000L * attempt)
+            }
+        }
+    }
+
+    fun isProfilePinEnabled(profileId: Int): Boolean {
+        return profilePinEnabled.value[profileId] == true
+    }
+
+    fun setProfilePin(
+        profileId: Int,
+        pin: String,
+        currentPin: String? = null,
+        onComplete: (SetProfilePinResult) -> Unit
+    ) {
+        if (_isPinOperationInProgress.value) return
+        viewModelScope.launch {
+            _isPinOperationInProgress.value = true
+            val result = profileSyncService.setProfilePin(profileId, pin, currentPin)
+            // Server reporting CurrentPinRequired means a PIN exists remotely —
+            // reconcile local cache so we never forget it again.
+            if (result is SetProfilePinResult.Success || result is SetProfilePinResult.CurrentPinRequired) {
+                profileLockStateDataStore.setPinEnabled(profileId, true)
+            }
+            _isPinOperationInProgress.value = false
+            onComplete(result)
+        }
+    }
+
+    fun clearProfilePin(profileId: Int, currentPin: String? = null, onComplete: (Boolean) -> Unit) {
+        if (_isPinOperationInProgress.value) return
+        viewModelScope.launch {
+            _isPinOperationInProgress.value = true
+            val success = profileSyncService.clearProfilePin(profileId, currentPin).isSuccess
+            if (success) {
+                profileLockStateDataStore.setPinEnabled(profileId, false)
+            }
+            _isPinOperationInProgress.value = false
+            onComplete(success)
+        }
+    }
+
+    fun verifyProfilePin(profileId: Int, pin: String, onComplete: (Result<SupabaseProfilePinVerifyResult>) -> Unit) {
+        if (_isPinOperationInProgress.value) return
+        viewModelScope.launch {
+            _isPinOperationInProgress.value = true
+            val result = profileSyncService.verifyProfilePin(profileId, pin)
+            _isPinOperationInProgress.value = false
+            onComplete(result)
+        }
+    }
+}
