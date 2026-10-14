@@ -9,8 +9,8 @@
     <string name="v2_experience_v2" translatable="false">Nuvio V2</string>
     <string name="v2_experience_original" translatable="false">Original Nuvio</string>
     <string name="v2_visual_style_title">Visual style</string>
-    <string name="v2_style_cinematic" translatable="false">Cinematic Glass</string>
-    <string name="v2_style_dark" translatable="false">Pure Liquid Dark</string>
+    <string name="v2_style_cinematic" translatable="false">Vidro cinematográfico</string>
+    <string name="v2_style_dark" translatable="false">Escuro líquido profundo</string>
     <string name="v2_scale_resolved">Applied scale: %1$d%%</string>
     <string name="v2_scale_automatic">Automatic</string>
     <string name="v2_scale_manual">Manual</string>
